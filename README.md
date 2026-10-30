@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # misconfig-ConfigMutationTester
 Randomly mutates configuration values within defined boundaries to assess the system's resilience to unexpected input and identify potential vulnerabilities or unexpected behavior due to configuration errors. - Focused on Check for misconfigurations in configuration files or infrastructure definitions
 
