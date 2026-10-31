@@ -100,14 +100,14 @@ def save_config(config, output_file):
         ValueError: If the file type is not supported.
         Exception: If there are issues writing to the file.
     """
+    if not output_file.endswith((".yaml", ".yml", ".json")):
+        raise ValueError("Unsupported configuration file type. Must be YAML or JSON.")
     try:
         with open(output_file, "w") as f:
             if output_file.endswith((".yaml", ".yml")):
                 yaml.dump(config, f, indent=2)  # Use indent for readability
             elif output_file.endswith(".json"):
                 json.dump(config, f, indent=2) # Use indent for readability
-            else:
-                raise ValueError("Unsupported configuration file type. Must be YAML or JSON.")
 
         logging.info(f"Mutated configuration saved to: {output_file}")
 
@@ -142,6 +142,9 @@ def mutate_value(value):
                 value = value[:start_index] + value[start_index + num_chars_to_remove:]
             else:
                 value = ""
+    elif isinstance(value, bool):
+        # Mutate boolean by flipping the value. Checked before int, because bool is a subclass of int.
+        value = not value
     elif isinstance(value, int):
         # Mutate integer by adding or subtracting a small random value
         mutation_amount = random.randint(-5, 5)
@@ -150,14 +153,41 @@ def mutate_value(value):
         # Mutate float by adding or subtracting a small random value
         mutation_amount = random.uniform(-0.5, 0.5)
         value += mutation_amount
-    elif isinstance(value, bool):
-        # Mutate boolean by flipping the value
-        value = not value
     else:
         # For unsupported types, log a warning and return the original value.
         logging.warning(f"Unsupported data type for mutation: {type(value)}. Returning original value.")
         return value
     return value
+
+
+def _mutate_leaf(value, mutation_rate):
+    """Mutate one scalar value with the given probability. Returns (value, changed_count)."""
+    if random.random() < mutation_rate:
+        new_value = mutate_value(value)
+        if new_value != value or type(new_value) is not type(value):
+            return new_value, 1
+        return new_value, 0
+    return value, 0
+
+
+def mutate_list(values, mutation_rate):
+    """Mutate items inside a list with the same per type rules. Returns (list, changed_count)."""
+    changed = 0
+    result = []
+    for item in values:
+        if isinstance(item, dict):
+            mutated, count = mutate_config(item, mutation_rate)
+            result.append(mutated)
+            changed += count
+        elif isinstance(item, list):
+            mutated, count = mutate_list(item, mutation_rate)
+            result.append(mutated)
+            changed += count
+        else:
+            mutated, count = _mutate_leaf(item, mutation_rate)
+            result.append(mutated)
+            changed += count
+    return result, changed
 
 
 def mutate_config(config, mutation_rate):
@@ -169,16 +199,21 @@ def mutate_config(config, mutation_rate):
         mutation_rate (float): The probability of mutating each configuration value.
 
     Returns:
-        dict: The mutated configuration dictionary.
+        tuple: (mutated configuration dictionary, number of values actually changed)
     """
+    changed = 0
     for key, value in config.items():
         if isinstance(value, dict):
             # Recursively mutate nested dictionaries
-            config[key] = mutate_config(value, mutation_rate)
-        elif random.random() < mutation_rate:
-            # Mutate the value based on its data type
-            config[key] = mutate_value(value)
-    return config
+            config[key], count = mutate_config(value, mutation_rate)
+            changed += count
+        elif isinstance(value, list):
+            config[key], count = mutate_list(value, mutation_rate)
+            changed += count
+        else:
+            config[key], count = _mutate_leaf(value, mutation_rate)
+            changed += count
+    return config, changed
 
 
 def run_test_command(config_file, test_command):
@@ -247,12 +282,19 @@ def main():
     parser = setup_argparse()
     args = parser.parse_args()
 
+    if not 0.0 <= args.mutation_rate <= 1.0:
+        parser.error(f"mutation rate must be between 0.0 and 1.0, got {args.mutation_rate}")
+
     try:
         # Load the configuration file
         config = load_config(args.config_file)
 
         # Mutate the configuration
-        mutated_config = mutate_config(config, args.mutation_rate)
+        mutated_config, mutation_count = mutate_config(config, args.mutation_rate)
+        if mutation_count == 0:
+            logging.error("No configuration values were mutated. Reporting failure instead of success, and leaving the output file unwritten.")
+            return 1
+        logging.info(f"Mutated {mutation_count} configuration value(s).")
 
         # Determine the output file
         output_file = args.output_file if args.output_file else args.config_file
