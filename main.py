@@ -103,6 +103,10 @@ def save_config(config, output_file):
     if not output_file.endswith((".yaml", ".yml", ".json")):
         raise ValueError("Unsupported configuration file type. Must be YAML or JSON.")
     try:
+        # Unlike a serialize first design, this dumps straight into
+        # the opened file. A value the target format cannot hold, a
+        # YAML date headed for JSON, fails halfway through the dump
+        # and leaves a truncated file behind at the output path.
         with open(output_file, "w") as f:
             if output_file.endswith((".yaml", ".yml")):
                 yaml.dump(config, f, indent=2)  # Use indent for readability
@@ -141,6 +145,11 @@ def mutate_value(value):
                 start_index = random.randint(0, len(value) - num_chars_to_remove)
                 value = value[:start_index] + value[start_index + num_chars_to_remove:]
             else:
+                # A string of one or two characters takes this branch and
+                # becomes empty, because there is nothing safe to trim from
+                # it. Short codes and single letter settings therefore mutate
+                # more violently than long strings, which only ever lose a
+                # slice from the middle or gain a few characters.
                 value = ""
     elif isinstance(value, bool):
         # Mutate boolean by flipping the value. Checked before int, because bool is a subclass of int.
@@ -211,6 +220,10 @@ def mutate_config(config, mutation_rate):
             config[key], count = mutate_list(value, mutation_rate)
             changed += count
         else:
+            # Keys are never mutated, only values, and the mutation happens
+            # in place on the loaded mapping. A misspelled key name, a
+            # renamed section, a dropped entry: none of those realistic
+            # breakage shapes are in my repertoire.
             config[key], count = _mutate_leaf(value, mutation_rate)
             changed += count
     return config, changed
@@ -225,6 +238,11 @@ def run_test_command(config_file, test_command):
         test_command (str): The test command to execute, with '{}' as a placeholder for the config file path.
     """
     try:
+        # format is applied to the operator's whole command, so any
+        # other braces in it, an awk block, a JSON argument, a second
+        # placeholder, are treated as format fields and raise. That
+        # error is caught below and reported as a failed test, with
+        # nothing saying the command never ran.
         command = test_command.format(config_file)
         logging.info(f"Executing test command: {command}")
         result = subprocess.run(command, shell=True, capture_output=True, text=True)
@@ -290,6 +308,11 @@ def main():
         config = load_config(args.config_file)
 
         # Mutate the configuration
+        # Nothing seeds the random module anywhere in this file, so a
+        # run cannot be replayed. The mutated file is the only record
+        # of what was tested, and once it is overwritten the exact
+        # case that made a system fail is gone. Anyone chasing a
+        # failure I found has to mutate again and hope.
         mutated_config, mutation_count = mutate_config(config, args.mutation_rate)
         if mutation_count == 0:
             logging.error("No configuration values were mutated. Reporting failure instead of success, and leaving the output file unwritten.")
@@ -300,6 +323,11 @@ def main():
         output_file = args.output_file if args.output_file else args.config_file
 
         # Save the mutated configuration to the output file
+        # The mutated file is written before linting and before the
+        # test command runs, and when no output path was given it is
+        # the original file. A failing test therefore leaves the
+        # mutated config in place as the live one; I never restore
+        # the original, because I never kept it.
         save_config(mutated_config, output_file)
 
         # Optionally lint the mutated config
